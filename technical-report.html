@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交互式无人机导航 · 联合航点 Minimum Snap 验证报告</title>
+<style>
+:root{color-scheme:light;--ink:#1e2a38;--muted:#49596c;--line:#d6dfe8;--accent:#145d94;--paper:#f2f6fa}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.7 system-ui,"Microsoft YaHei",sans-serif}
+main{max-width:1100px;margin:auto;background:white;padding:clamp(16px,5vw,64px)}
+h1,h2,h3{line-height:1.35}h1{font-size:clamp(28px,4vw,44px);margin-bottom:8px}
+h2{margin:42px 0 12px;border-top:1px solid var(--line);padding-top:20px}
+h3{margin-top:26px}a{color:var(--accent)}strong{color:#134e78}
+.intro{color:var(--muted);max-width:82ch}.math{background:#eff5fb;padding:12px 16px;overflow:auto;white-space:pre-wrap}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:7px 12px;border-bottom:1px solid var(--line);text-align:right}th:first-child,td:first-child{text-align:left}
+thead{background:#edf4fb}.scroll{overflow-x:auto}figure{margin:22px 0}
+img{max-width:100%;height:auto;display:block;border:1px solid var(--line)}figcaption{color:var(--muted);font-size:.9rem}
+nav a{display:inline-block;margin-right:16px}code{font-size:.92em;overflow-wrap:anywhere}
+</style>
+</head>
+<body><main>
+<header>
+<h1>交互式无人机导航中的联合航点优化</h1>
+<p class="intro">2026 年 11 月 24 日 · 七次 Bézier · 固定走廊、固定段时长的凸二次规划</p>
+<p>两种模式均完成 D1–D9 自动交互和全绕行，四次运行均无墙体接触。自动工况的执行参考 Snap 上升，全绕行工况的 Snap 与 jerk 下降但到达较晚。默认配置保留 <code>baseline</code>。</p>
+<nav><a href="#model">数学模型</a><a href="#rolling">滚动集成</a><a href="#checks">验证</a><a href="#results">实验结果</a><a href="#plots">图与原始数据</a></nav>
+</header>
+
+<section id="model">
+<h2>数学模型</h2>
+<p>原求解器固定所有节点位置，以相邻两段共享的内点速度、加速度和 jerk，以及起始 jerk 为变量。它以可行基准控制多边形构造半空间，再将问题化成白化坐标中的最小距离投影。联合版本在同一向量中加入明确授权的二维内点位置，常量已知的节点只出现在仿射常数项。窗口末端的速度、加速度、jerk 为零。滚动窗口从仍有效的旧参考接入时，可以固定整组起始状态到三阶导数。</p>
+<p>令 τ = median(T)，自由导数变量储存为 τʳ·p⁽ʳ⁾。位置使用以窗口起点为原点的米制局部坐标。下列式中，q、v、a、j 表示对应端点的物理量。控制点索引从 0 到 7。</p>
+<pre class="math">B₀ = qᵢ               B₇ = qᵢ₊₁
+B₁ = qᵢ + Tvᵢ/7       B₆ = qᵢ₊₁ − Tvᵢ₊₁/7
+B₂ = qᵢ + 2Tvᵢ/7 + T²aᵢ/42
+B₅ = qᵢ₊₁ − 2Tvᵢ₊₁/7 + T²aᵢ₊₁/42
+B₃ = qᵢ + 3Tvᵢ/7 + 3T²aᵢ/42 + T³jᵢ/210
+B₄ = qᵢ₊₁ − 3Tvᵢ₊₁/7 + 3T²aᵢ₊₁/42 − T³jᵢ₊₁/210</pre>
+<p>固定 T 后，每个控制点写成 B = Mz + c。自由航点在相邻段的四个同侧控制点中具有相同的位置系数。两侧使用同一行节点导数变量，由端点差分恢复时达到 C³。代码还重新对控制点求差分并核对求解变量及首尾状态。</p>
+<p>设 Δ⁴ 为第四差分，G = <code>_SNAP_GRAM</code>，F = <code>_SNAP_FACTOR</code>，满足 FᵀF = G。每段物理代价为 840²·T⁻⁷·‖FΔ⁴B‖²。将所有 Snap 块与参考偏离块合并成残差 Rz + d，有以下关系。</p>
+<pre class="math">J = Jₛₙₐₚ + λₚ Σᵢ∈free ‖qᵢ − qᵢ(ref)‖²
+H = RᵀR， f = 2Rᵀd， c₀ = dᵀd
+J = zᵀHz + fᵀz + c₀
+控制点约束 Aₖ Bₖ,ᵢ ≤ bₖ 代入后得到线性约束 Lz ≤ u
+航点区域 qₖ ∈ Cₖ₋₁ ∩ Cₖ ∩ Tₖ，另外可加房间侧和用户半空间</pre>
+<p>RᵀR 是对称半正定矩阵。实现按列缩放 R，并用 SVD 把可识别的满秩目标白化。若未变换即调用 OSQP，则需提交 P = 2H 和 q = f。当前实现使用 z = z* + Wy，白化后提交 P = I、q = 0，并变换每条原始半空间。斜向法线可同时包含 x 与 y。若无约束极小点已可行，则直接验算；其他情形由 OSQP 从一般线性约束求解。求解后按单位法线计算世界坐标的最大残差，接受阈值为 10⁻⁸ m。接近奇异的系统、不可行解、迭代耗尽及未通过独立复核的解均返回诊断。</p>
+<p>预期进度样点使用 (1−s)qᵢ + sqᵢ₊₁。长沿墙段的识别基于输入参考方向，墙法向速度惩罚以优化后的端点平均位移为基准。这两个可选项仍然是仿射残差。默认 λₚ = 100 s⁻⁷，0.10 m 的单点位移对应 1 m²/s⁷ 的代价。可用相同窗口的 Snap、位移和动力学变化比较 30、100、300 s⁻⁷。物理积分按 T⁻⁷ 独立报告。</p>
+</section>
+
+<section id="rolling">
+<h2>航点权限、走廊与滚动执行</h2>
+<div class="scroll"><table>
+<thead><tr><th>任务角色</th><th>位置权限</th></tr></thead>
+<tbody>
+<tr><td>窗口起终点、全局任务终点、下一动作固定后缀</td><td>固定</td></tr>
+<tr><td>推门准备点、门扇中点接触目标、直接穿门关键点</td><td>固定，接触状态继续由原控制器执行</td></tr>
+<tr><td>普通飞行和门前接近的内点导引航点</td><td>允许在交集内连续移动</td></tr>
+<tr><td>绕行入口和出口附近连接点、退离后接入绕行的局部转接点</td><td>在成为窗口内点且通过原安全几何认证后允许移动</td></tr>
+<tr><td>完成安全分离后的释放过渡点</td><td>允许在相邻走廊内移动，窗口终点仍固定</td></tr>
+</tbody></table></div>
+<p>走廊由当前状态、原局部参考航点和观测门扇构建。原有墙厚、门扇厚度、0.266 m 机体包络半径和 0.045 m 走廊附加余量均参与求解。原参考方向还产生固定横向带。共享位置分别作为前一段 B₇ 和后一段 B₀，同时受两个走廊约束。附加的每轴 0.18 m 信赖盒和房间侧约束限制节点跨越分隔面。参考弦与优化曲线都落在同一段凸走廊内，可以在不穿过其分隔障碍的情况下连续变形。退化交集可求出线段或单点上的解。交集为空返回不可行，由标准回退处理。</p>
+<p>每段 8 个控制点接受半空间复查，再调用原有实体几何凸包认证。门叶估计角变化时，对当前段剩余的 Bézier 子段与后续段重新认证。无有效证书的轨迹被撤销。离散采样净空用于评估，运行准入依据凸包认证。</p>
+<p>局部调度持有实际连接位置和对应累计时刻，使用原锚点加路线 revision 找到该局部节点。决策层以执行位置判断是否已到达中间航点，A* 节点和原路线始终使用原锚点。旧的几何候选筛选仍参与两个模式。每次延长或回收段时长都使用同一参考航点、位置权限及走廊重新求解。外层复核保守的速度、加速度、jerk、名义旋翼输出余量和几何约束。</p>
+<p>联合求解或其外层时间调整失败时，尝试原固定航点 Minimum Snap。再失败时沿用已认证前缀，或使用制动和保持。继续采用旧参考的 joint 接入可达 C³，改用实测边界状态或回退到原方法时按原有位置、速度、加速度接口衔接。新旧轨迹之间的 jerk 连续性因此取决于接入分支。</p>
+</section>
+
+<section id="checks">
+<h2>验证范围与版本</h2>
+<p>基线源提交为 <code>f4f18e3d05034ddc746a1ea94635203f69b8763e</code>。复制了当时工作区的 <code>run_demo.py</code> 与 <code>README.md</code> 修改。源基线自动工况在 154.05 s 到达终点，配对的 baseline 自动工况复现了这一时间和 114.658 m 路径长度。场景、XML、原求解器、障碍几何、全局 A* 和推力控制的对应实现通过文件哈希核对。</p>
+<p>在 Python 3.9.25、NumPy 2.0.2、MuJoCo 3.3.2、OSQP 1.0.4、SciPy 1.13.1 和 Matplotlib 3.9.4 上验证。13 项自动测试覆盖固定航点和可选正则项等价、连续二维移动、斜向半空间和不相交走廊、零宽交集、固定接触准备点、非零起始状态、门扇变化撤销轨迹、病态与迭代耗尽、回退和锚点保留、外层重求及滚动 C³ 接入。</p>
+<p>固定时长和固定走廊下，若固定航点解可行且额外移动区域包含参考点，释放位置变量会扩大可行集。因此在相同目标与边界条件下，最优目标至多等于固定位置问题的最优目标。完整闭环会重新分配时间、改变换轨时刻和起始状态，不能由这条性质推导全程 Snap 或实际飞行时间。</p>
+</section>
+
+<section id="results">
+<h2>MuJoCo 配对实验</h2>
+<p>两组均采用初始原场景、种子 7、测距噪声 0.003 m。自动工况完成 D1 绕行、D2 直接穿门，D4–D6 推门后退离并绕行，D3、D7–D9 推门后释放穿门。两模式记录的这些动作序列一致。全绕行工况覆盖 D1–D9，包含连续绕行口与飞行中接续。</p>
+<div class="scroll"><table>
+<thead><tr><th>指标</th><th>自动 baseline</th><th>自动 joint</th><th>全绕行 baseline</th><th>全绕行 joint</th></tr></thead>
+<tbody>
+<tr><td>实验结果</td><td>到达</td><td>到达</td><td>到达</td><td>到达</td></tr>
+<tr><td>仿真飞行时间（s）</td><td>154.05</td><td>153.25</td><td>165.95</td><td>175.85</td></tr>
+<tr><td>估计路径长度（m）</td><td>114.658</td><td>114.387</td><td>171.052</td><td>168.522</td></tr>
+<tr><td>执行参考 Snap 积分（m²/s⁷）</td><td>103.60</td><td>236.34</td><td>565.35</td><td>295.95</td></tr>
+<tr><td>参考 jerk RMS / P95 / 峰值（m/s³）</td><td>0.493 / 0.987 / 3.954</td><td>0.547 / 1.020 / 5.610</td><td>0.788 / 2.139 / 5.227</td><td>0.481 / 1.093 / 3.393</td></tr>
+<tr><td>参考曲率峰值（m⁻¹）</td><td>4.484</td><td>4.610</td><td>5.398</td><td>2.591</td></tr>
+<tr><td>真实跟踪误差 P95（m）</td><td>0.0250</td><td>0.0253</td><td>0.0468</td><td>0.0278</td></tr>
+<tr><td>自由飞行最小抽样真值净空（m）</td><td>0.0692</td><td>0.0689</td><td>0.1951</td><td>0.2361</td></tr>
+<tr><td>墙接触步数 / 过门门扇接触步数</td><td>0 / 281</td><td>0 / 280</td><td>0 / 0</td><td>0 / 0</td></tr>
+<tr><td>碰撞接触段数，排除计划推门</td><td>50</td><td>42</td><td>0</td><td>0</td></tr>
+<tr><td>QP P50 / P95 / 最大（ms）</td><td> — </td><td>2.39 / 13.63 / 29.05</td><td> — </td><td>3.80 / 5.37 / 5.96</td></tr>
+<tr><td>联合求解通过次数 / 尝试次数</td><td> — </td><td>132 / 137</td><td> — </td><td>144 / 151</td></tr>
+<tr><td>尝试固定回退次数 / 最终规划失败次数</td><td>0 / 0</td><td>4 / 0</td><td>0 / 7</td><td>7 / 7</td></tr>
+<tr><td>超过 50 ms 的规划扫描次数</td><td>1</td><td>6</td><td>0</td><td>8</td></tr>
+<tr><td>移动航点个数 / 最大位移（m）</td><td>0 / 0</td><td>23 / 0.246</td><td>0 / 0</td><td>13 / 0.255</td></tr>
+</tbody>
+</table></div>
+<p>Snap 对执行过的分段参考积分。重规划换轨时只积分旧曲线的实际执行前缀。区间积分使用四点 Gauss–Legendre 公式，七次曲线的 Snap 平方在段内为六次。jerk 和参考曲率取 50 ms 采样，跟踪误差依据 MuJoCo 机体真值。曲率只统计速度高于 0.30 m/s 的样本。最小净空使用自由飞行扫描帧与实际墙体和门扇的实体尺寸，碰撞集合则按物理步采样。接触段数含释放与退离时的门接触，因此可与过门接触步数一起解读。</p>
+<p><strong>自动交互。</strong>joint 快 0.80 s，Snap 上升约 128%，参考 jerk RMS 上升约 11%。D4–D6 的三次退离转绕行安装计划贡献了联合模式约 179 m²/s⁷ 的 Snap，其中三个首段约为 0.59–0.82 s，baseline 对应约 1.01–1.31 s。T⁻⁷ 的时间缩放、起始状态与安装时刻共同影响积分。D4–D6 的绕行出口实际曲率 P95 均下降，入口实际曲率 P95 均上升。最小抽样净空变化约 −0.3 mm。两次实验均发生释放或退离期间的门接触。</p>
+<p><strong>全绕行。</strong>joint 路径短约 2.53 m，飞行时间增加 9.90 s。执行参考 Snap 下降约 48%，jerk RMS 下降约 39%，参考曲率峰值下降约 52%。跟踪误差 P95 和最小抽样净空改善。该组表现说明平滑性、路径长度和任务时间需要单独评价。</p>
+<p><strong>固定时间复算。</strong>对实际安装且有位置自由度的 joint 窗口，用相同走廊、时长、起始位置、速度和加速度，复算固定与自由内点两版纯 Snap 加位置正则。两版均自由求起始 jerk，使用默认信赖盒。自动组 12 窗口中 11 个双解成功且目标下降，中位降幅 23.35%。全绕行组 11 个窗口全部双解成功且目标下降，中位降幅 39.42%。自动组另一个窗口的状态已保留在复算文件。该试验检查内层优化的效果，实际调度仍经过可选正则、房间侧、时间和动态复查。</p>
+<p><strong>在线耗时。</strong>已在启动时预载 OSQP。单次 QP P95 低于 50 ms 扫描周期，但一个扫描内可能多次试候选和重新分配时长。自动和全绕行 joint 的最大窗口求解时间分别为 135.78 ms 与 78.32 ms，不能视为硬实时达标。求解成功率包含无需进入 OSQP 迭代的无约束极小点可行分支。原有 35 ms 可选候选比较预算按墙钟计时，机器负载可能改变搜索深度。</p>
+<p><strong>尚待工程验证。</strong>当前实验使用同一地图与一个种子。门角变化直接使旧轨迹失效的行为由自动测试触发，本次飞行只观测到门角更新后的重认证。单种子结果不足以估计跟踪净空、接触频数或时延的分布。下一步可在多种子下按动作统计，并单独检查退离后首段的时间分配与运动连续性。</p>
+</section>
+
+<section id="plots">
+<h2>对比图与数据</h2>
+<p>灰色标记 A* 输出，橙色表示 baseline 或进入 QP 前的启发式点，蓝色表示联合模式，浅绿表示固定凸走廊。局部图按相同门和动作匹配 baseline 窗口，两条闭环轨迹的起始状态与分段时间可以不同。固定条件下的数值比较另见复算文件。</p>
+<figure><img src="runs/comparison/auto/mission_overlay.png" alt="自动工况全程真值和参考轨迹叠加"><figcaption>自动交互任务轨迹</figcaption></figure>
+<figure><img src="runs/comparison/auto/local_corridors_and_knots.png" alt="绕行、接近、释放、穿门的走廊和航点"><figcaption>自动工况代表窗口的 A* 航点、启发式点、联合移动箭头与固定走廊</figcaption></figure>
+<figure><img src="runs/comparison/auto/reference_dynamics.png" alt="自动工况速度加速度和 jerk 曲率"><figcaption>自动工况参考速度、加速度、jerk 和曲率</figcaption></figure>
+<figure><img src="runs/comparison/detour/mission_overlay.png" alt="全绕行任务轨迹叠加"><figcaption>全绕行任务轨迹</figcaption></figure>
+<p><a href="runs/comparison/detour/local_corridors_and_knots.png">全绕行走廊与航点</a> · <a href="runs/comparison/detour/reference_dynamics.png">全绕行参考动态曲线</a> · <a href="runs/comparison/metrics.csv">全部指标</a> · <a href="runs/comparison/bypass_metrics.csv">逐门局部指标</a> · <a href="runs/comparison/auto/fixed_time_audit.json">自动工况复算</a> · <a href="runs/comparison/detour/fixed_time_audit.json">全绕行复算</a></p>
+<p>图表和原始数据位于运行目录。工程检出后可运行 <code>python compare_mujoco.py</code> 生成。依赖、配置、单测和参数说明见 <a href="README.md">README</a>。</p>
+</section>
+</main></body></html>
